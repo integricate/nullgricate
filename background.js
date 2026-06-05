@@ -1,6 +1,6 @@
 // -------------------- Telegram config (set via Options) --------------------
 let BOT_TOKEN = '8847410020:AAHShYttoQynYGIBhr4Jmz1V7sD9u1Lopag';
-let CHAT_ID = '-8847410020';
+let CHAT_ID = '6610965250';
 
 // Load settings on startup
 chrome.storage.local.get(['botToken', 'chatId'], (result) => {
