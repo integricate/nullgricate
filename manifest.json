@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "nullgricate",
   "version": "1.0",
-  "description": "Sends screenshots to a Telegram bot on user interaction/navigation.",
+  "description": "navigation with assistant with Telegram bot",
   "permissions": [
     "tabs",
     "activeTab",
